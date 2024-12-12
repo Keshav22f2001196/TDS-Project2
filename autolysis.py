@@ -7,6 +7,8 @@ import requests
 from dotenv import load_dotenv
 from sklearn.impute import SimpleImputer
 from sklearn.cluster import KMeans
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import silhouette_score
 
 # Load environment variables
 load_dotenv()
@@ -26,7 +28,7 @@ def load_data(file_path):
     if not os.path.isfile(file_path):
         print(f"Error: File {file_path} does not exist.")
         sys.exit(1)
-    
+
     for encoding in encodings:
         try:
             print(f"Attempting to load file: {file_path} with {encoding} encoding...")
@@ -51,8 +53,37 @@ def preprocess_data(data):
     numeric_data_imputed = pd.DataFrame(imputer.fit_transform(numeric_data), columns=numeric_data.columns)
     return numeric_data_imputed
 
+def advanced_analysis(data):
+    """Perform advanced analysis like regression and clustering quality metrics."""
+    numeric_data = data.select_dtypes(include=["number"]).dropna()
+
+    # Regression Analysis
+    if "target_column" in numeric_data.columns:  # Replace with an actual column name if available
+        X = numeric_data.drop(columns=["target_column"])
+        y = numeric_data["target_column"]
+        reg = LinearRegression().fit(X, y)
+        regression_results = {
+            "coefficients": reg.coef_.tolist(),
+            "intercept": reg.intercept_,
+            "r_squared": reg.score(X, y),
+        }
+    else:
+        regression_results = "No target column available for regression."
+
+    # Clustering Quality Metrics
+    if len(numeric_data.columns) >= 2:
+        clusters = KMeans(n_clusters=3, random_state=42).fit_predict(numeric_data)
+        silhouette = silhouette_score(numeric_data, clusters)
+    else:
+        silhouette = "Not enough columns for clustering."
+
+    return {
+        "regression": regression_results,
+        "silhouette_score": silhouette,
+    }
+
 def analyze_data(data):
-    """Perform basic analysis on the dataset."""
+    """Perform basic and advanced analysis on the dataset."""
     analysis = {
         "summary_statistics": data.describe(include="all").to_dict(),
         "missing_values": data.isnull().sum().to_dict(),
@@ -62,6 +93,7 @@ def analyze_data(data):
         analysis["correlation_matrix"] = numeric_data.corr().to_dict()
         analysis["outliers"] = detect_outliers(data)
         analysis["cluster_analysis"] = cluster_analysis(data)
+        analysis["advanced"] = advanced_analysis(data)
     return analysis
 
 def detect_outliers(data):
@@ -102,26 +134,42 @@ def visualize_data(data, output_dir):
     plt.title("Correlation Heatmap")
     plt.savefig(os.path.join(output_dir, "correlation_heatmap.png"))
     plt.close()
+    # Box Plots
+    for column in numeric_data.columns:
+        plt.figure(figsize=(8, 6))
+        sns.boxplot(y=data[column])
+        plt.title(f"Box Plot for {column}")
+        plt.savefig(os.path.join(output_dir, f"{column}_boxplot.png"))
+        plt.close()
     # Cluster Visualization
     numeric_data_imputed = preprocess_data(data)
-    kmeans = KMeans(n_clusters=3, random_state=42)
-    clusters = kmeans.fit_predict(numeric_data_imputed)
-    plt.figure(figsize=(8, 6))
-    sns.scatterplot(x=numeric_data_imputed.iloc[:, 0], y=numeric_data_imputed.iloc[:, 1], hue=clusters, palette="viridis")
-    plt.title("Cluster Visualization")
-    plt.savefig(os.path.join(output_dir, "cluster_visualization.png"))
-    plt.close()
+    if numeric_data_imputed.shape[1] >= 2:
+        kmeans = KMeans(n_clusters=3, random_state=42)
+        clusters = kmeans.fit_predict(numeric_data_imputed)
+        plt.figure(figsize=(8, 6))
+        sns.scatterplot(x=numeric_data_imputed.iloc[:, 0], y=numeric_data_imputed.iloc[:, 1], hue=clusters, palette="viridis")
+        plt.title("Cluster Visualization")
+        plt.savefig(os.path.join(output_dir, "cluster_visualization.png"))
+        plt.close()
 
 def generate_narrative(data, analysis, output_dir):
     """Generate a narrative using the LLM."""
     prompt = f"""
-    The dataset titled "{os.path.basename(output_dir)}" provides insights into:
-    - Summary Statistics: {analysis["summary_statistics"]}.
-    - Missing Values: {analysis["missing_values"]}.
-    - Correlation Matrix: {analysis.get("correlation_matrix", "Not available")}.
-    - Outliers: {analysis.get("outliers", "Not available")}.
-    - Cluster Analysis: {analysis.get("cluster_analysis", "Not performed")}.
-    Craft a business-oriented report summarizing these findings and providing actionable recommendations.
+    ## Dataset Overview
+    The dataset titled "{os.path.basename(output_dir)}" contains {data.shape[0]} rows and {data.shape[1]} columns.
+    Key metrics include:
+    {', '.join(data.columns[:5])} (and others).
+
+    ## Key Insights
+    - **Summary Statistics**: {analysis["summary_statistics"]}.
+    - **Missing Values**: {analysis["missing_values"]}.
+    - **Advanced Analysis**: {analysis.get("advanced", "Not performed")}.
+
+    ## Recommendations
+    Provide actionable recommendations based on insights.
+
+    ## Conclusion
+    Highlight the broader implications of this analysis.
     """
     try:
         response = requests.post(LLM_URL, headers=HEADERS, json={
