@@ -1,241 +1,195 @@
-import sys
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pandas",
+#     "seaborn",
+#     "matplotlib",
+#     "requests",
+#     "python-dotenv",
+#     "scikit-learn",
+#     "tenacity",
+#     "chardet",
+# ]
+# ///
+
 import os
+import sys
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import requests
+import numpy as np
 from dotenv import load_dotenv
 from sklearn.impute import SimpleImputer
-from sklearn.cluster import KMeans
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import silhouette_score
+from tenacity import retry, stop_after_attempt, wait_fixed
+import chardet
+import base64
 
 # Load environment variables
 load_dotenv()
 AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")
-
 if not AIPROXY_TOKEN:
-    print("Error: AIPROXY_TOKEN not set. Please configure your environment variable.")
+    print("Error: AIPROXY_TOKEN not set.")
     sys.exit(1)
 
-# Constants
-LLM_URL = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
 HEADERS = {"Authorization": f"Bearer {AIPROXY_TOKEN}"}
+LLM_URL = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(5))
+def call_llm(prompt, images=None):
+    """Call the LLM API for text or image analysis."""
+    payload = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}], "max_tokens": 1000}
+    if images:
+        payload["messages"].append({"role": "user", "content": [{"type": "image_url", "image_url": {"url": images}}]})
+    response = requests.post(LLM_URL, headers=HEADERS, json=payload, timeout=60)
+    response.raise_for_status()
+    return response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+
+def detect_encoding(file_path):
+    """Detect file encoding dynamically."""
+    with open(file_path, "rb") as f:
+        result = chardet.detect(f.read())
+    return result.get("encoding", "utf-8")
 
 def load_data(file_path):
-    """Load dataset from a CSV file with multiple encoding fallbacks."""
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError(f"Error: File {file_path} does not exist.")
-    encodings = ["utf-8", "ISO-8859-1", "latin1"]
-    for encoding in encodings:
-        try:
-            return pd.read_csv(file_path, encoding=encoding)
-        except Exception as e:
-            print(f"Failed with {encoding}: {e}")
-    raise ValueError("All encoding attempts failed. Please check the file.")
-
-
-def preprocess_data(data):
-    """Handle missing values in numeric columns by imputing with the column mean."""
-    numeric_data = data.select_dtypes(include=["number"])
-    imputer = SimpleImputer(strategy="mean")
-    numeric_data_imputed = pd.DataFrame(imputer.fit_transform(numeric_data), columns=numeric_data.columns)
-    return numeric_data_imputed
-
-def advanced_analysis(data):
-    """Perform advanced analysis like regression and clustering quality metrics."""
-    numeric_data = data.select_dtypes(include=["number"]).dropna()
-    target_column = numeric_data.columns[-1] if len(numeric_data.columns) > 1 else None
-
-    # Regression Analysis
-    if target_column:
-        X = numeric_data.drop(columns=[target_column])
-        y = numeric_data[target_column]
-        reg = LinearRegression().fit(X, y)
-        regression_results = {
-            "coefficients": reg.coef_.tolist(),
-            "intercept": reg.intercept_,
-            "r_squared": reg.score(X, y),
-        }
-    else:
-        regression_results = "No target column available for regression."
-
-
-from scipy.stats import pearsonr, ttest_ind, linregress
-
-def analyze_data(data):
-    """Perform advanced analysis on the dataset."""
-    analysis = {
-        "summary_statistics": data.describe(include="all").to_dict(),
-        "missing_values": data.isnull().sum().to_dict(),
-    }
-    numeric_data = data.select_dtypes(include=["number"])
-    if not numeric_data.empty:
-        # Correlation matrix
-        analysis["correlation_matrix"] = numeric_data.corr().to_dict()
-
-        # Pairwise Pearson Correlation
-        correlations = {
-            f"{col1} vs {col2}": pearsonr(numeric_data[col1], numeric_data[col2])
-            for col1 in numeric_data.columns
-            for col2 in numeric_data.columns
-            if col1 != col2
-        }
-        analysis["pairwise_correlations"] = correlations
-
-        # Hypothesis testing on two halves of the dataset
-        if numeric_data.shape[0] > 1:
-            ttest_results = {
-                col: ttest_ind(
-                    numeric_data[col][: len(numeric_data) // 2],
-                    numeric_data[col][len(numeric_data) // 2 :],
-                    equal_var=False,
-                ).pvalue
-                for col in numeric_data.columns
-            }
-            analysis["ttest_results"] = ttest_results
-
-        # Linear regression (example: first two columns)
-        if len(numeric_data.columns) >= 2:
-            col1, col2 = numeric_data.columns[:2]
-            regression = linregress(numeric_data[col1], numeric_data[col2])
-            analysis["regression"] = {
-                "slope": regression.slope,
-                "intercept": regression.intercept,
-                "r_value": regression.rvalue,
-                "p_value": regression.pvalue,
-                "stderr": regression.stderr,
-            }
-
-    return analysis
-
-def detect_outliers(data):
-    """Detect outliers in numeric columns using the IQR method."""
-    numeric_data = data.select_dtypes(include=["number"])
-    outliers = {}
-    for column in numeric_data.columns:
-        q1 = numeric_data[column].quantile(0.25)
-        q3 = numeric_data[column].quantile(0.75)
-        iqr = q3 - q1
-        lower_bound = q1 - 1.5 * iqr
-        upper_bound = q3 + 1.5 * iqr
-        outliers[column] = numeric_data[(numeric_data[column] < lower_bound) | (numeric_data[column] > upper_bound)].index.tolist()
-    return outliers
-
-def cluster_analysis(data):
-    """Perform clustering on numeric columns."""
-    numeric_data_imputed = preprocess_data(data)
-    if numeric_data_imputed.shape[1] < 2:
-        return "Not enough numeric columns for clustering."
-    kmeans = KMeans(n_clusters=3, random_state=42)
-    clusters = kmeans.fit_predict(numeric_data_imputed)
-    return {
-        "centroids": kmeans.cluster_centers_.tolist(),
-        "labels": clusters.tolist()
-    }
-def vision_analysis(data, output_dir):
-    """Perform vision-based analysis."""
-    numeric_data = data.select_dtypes(include=["number"])
-    if numeric_data.shape[1] >= 2:
-        plt.figure(figsize=(8, 6))
-        sns.scatterplot(
-            x=numeric_data.iloc[:, 0], 
-            y=numeric_data.iloc[:, 1], 
-            hue=numeric_data.iloc[:, 0] > numeric_data.iloc[:, 0].median(), 
-            palette="viridis"
-        )
-        plt.title("Vision Analysis: Clustering")
-        plt.savefig(os.path.join(output_dir, "vision_analysis.png"))
-        plt.close()
-    else:
-        print("Skipping vision analysis: Not enough numeric columns.")
-
-def visualize_data(data, output_dir):
-    """Generate and save enhanced visualizations."""
-    os.makedirs(output_dir, exist_ok=True)
-    numeric_data = data.select_dtypes(include=["number"])
-    if numeric_data.empty:
-        print("No numeric data available for visualization.")
-        return
-    # Correlation Heatmap
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm")
-    plt.title("Correlation Heatmap")
-    plt.savefig(os.path.join(output_dir, "correlation_heatmap.png"))
-    plt.close()
-    # Cluster Visualization
-    numeric_data_imputed = preprocess_data(data)
-    kmeans = KMeans(n_clusters=3, random_state=42)
-    clusters = kmeans.fit_predict(numeric_data_imputed)
-    plt.figure(figsize=(8, 6))
-    sns.scatterplot(x=numeric_data_imputed.iloc[:, 0], y=numeric_data_imputed.iloc[:, 1], hue=clusters, palette="viridis")
-    plt.title("Cluster Visualization")
-    plt.savefig(os.path.join(output_dir, "cluster_visualization.png"))
-    plt.close()
-
-    # Vision Analysis
-    vision_analysis(data, output_dir)
-
-def generate_dynamic_prompt(data, analysis):
-    """Generate a dynamic prompt based on the dataset structure."""
-    key_features = ", ".join(data.columns[:5]) + ("..." if len(data.columns) > 5 else "")
-    prompt = f"""
-    The dataset has {data.shape[0]} rows and {data.shape[1]} columns. Key features: {key_features}.
-    Analyze the data to:
-    1. Summarize trends and correlations.
-    2. Identify significant outliers or patterns.
-    3. Provide actionable business recommendations.
-    """
-    return prompt
-
-
-def generate_narrative(data, analysis, output_dir):
-    """Generate a narrative using the LLM."""
-    prompt = generate_dynamic_prompt(data, analysis)
+    """Load and clean data with robust error handling."""
     try:
-        response = requests.post(LLM_URL, headers=HEADERS, json={
-            "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": prompt}]
-        })
-        if response.status_code == 200:
-            narrative = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            if not narrative or "error" in narrative.lower():
-                return "Fallback narrative: Unable to generate meaningful insights. Please review manually."
-            return narrative
-        else:
-            print(f"LLM request failed: {response.status_code} - {response.text}")
-    except Exception as e:
-        print(f"Error generating narrative: {e}")
-    return "Fallback narrative: Unable to process insights. Check visualizations for details."
+        # Detect encoding and load data
+        encoding = detect_encoding(file_path)
+        print(f"Detected encoding: {encoding}")
+        data = pd.read_csv(file_path, encoding=encoding)
 
-def save_readme(narrative, output_dir):
-    """Save narrative and visualizations to README.md."""
-    readme_path = os.path.join(output_dir, "README.md")
-    with open(readme_path, "w", encoding="utf-8") as f:
-        f.write("# Dataset Analysis\n\n")
-        f.write("## Narrative Insights\n\n")
-        f.write(narrative)
-        f.write("\n\n## Key Visualizations\n\n")
-        for file in os.listdir(output_dir):
-            if file.endswith(".png"):
-                # Include relative paths for images
-                f.write(f"![{file}](./{file})\n")
+        # Replace infinite or excessively large values
+        for col in data.columns:
+            if np.issubdtype(data[col].dtype, np.number):
+                # Convert invalid numbers to NaN
+                data[col] = pd.to_numeric(data[col], errors="coerce")
+                # Cap extremely large values
+                upper_limit = 1e9  # Adjust as needed
+                data[col] = data[col].apply(lambda x: np.nan if abs(x) > upper_limit else x)
+
+        # Replace inf and -inf with NaN
+        data.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # Drop columns with no valid values
+        data.dropna(axis=1, how="all", inplace=True)
+
+        # Handle missing values dynamically
+        for col in data.columns:
+            if data[col].isnull().any():
+                strategy = "mean" if np.issubdtype(data[col].dtype, np.number) else "most_frequent"
+                imputer = SimpleImputer(strategy=strategy)
+                try:
+                    data[col] = imputer.fit_transform(data[[col]]).ravel()
+                except Exception as e:
+                    print(f"Skipping imputation for {col}: {e}")
+
+        print("Data loaded and cleaned successfully.")
+        return data
+
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        sys.exit(1)
+
+
+def generate_visualizations(data, output_dir):
+    """Generate meaningful visualizations."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    numeric_data = data.select_dtypes(include=[np.number])
+    categorical_data = data.select_dtypes(include=["object"])
+
+    # Correlation Heatmap
+    if numeric_data.shape[1] > 1:
+        plt.figure(figsize=(6, 6))
+        sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm")
+        plt.title("Correlation Heatmap")
+        heatmap_path = os.path.join(output_dir, "correlation_heatmap.png")
+        plt.savefig(heatmap_path)
+        plt.close()
+
+    # Generate one relevant chart (numeric or categorical)
+    if not numeric_data.empty:
+        plt.figure(figsize=(6, 4))
+        sns.histplot(numeric_data.iloc[:, 0], bins=20, kde=True)
+        plt.title(f"Distribution of {numeric_data.columns[0]}")
+        numeric_path = os.path.join(output_dir, "numeric_distribution.png")
+        plt.savefig(numeric_path)
+        plt.close()
+    elif not categorical_data.empty:
+        plt.figure(figsize=(6, 4))
+        data[categorical_data.columns[0]].value_counts().head(5).plot(kind="bar")
+        plt.title(f"Top Categories in {categorical_data.columns[0]}")
+        category_path = os.path.join(output_dir, "top_categories.png")
+        plt.savefig(category_path)
+        plt.close()
+
+    return [heatmap_path, numeric_path if 'numeric_path' in locals() else category_path]
+
+import base64
+
+def generate_readme(data_summary, insights, image_paths, output_dir):
+    """Generate a README.md file with results."""
+    try:
+        # Encode images for LLM vision capability
+        image_base64 = []
+        for path in image_paths:
+            with open(path, "rb") as img_file:
+                encoded_image = base64.b64encode(img_file.read()).decode("utf-8")
+                image_base64.append(f"data:image/png;base64,{encoded_image}")
+
+        # Call LLM for summary with multiple images
+        llm_prompt = f"""
+        Write an engaging analysis report using the following:
+        1. Data Summary: {data_summary}
+        2. Insights: {insights}
+        3. PNG Images: Visualizations included for better insights.
+
+        Structure:
+        - The data you received, briefly.
+        - The analysis you carried out.
+        - The insights you discovered.
+        - The implications of your findings (i.e., what to do with the insights).
+
+        Make it engaging and interesting, with a clear narrative and actionable outcomes.
+        Highlight key findings from visualizations.
+        """
+        # Send prompt and first image to the LLM
+        response = call_llm(llm_prompt)
+
+        # Validate response
+        if not response:
+            response = "Error: LLM could not generate insights. Please check the API or input."
+
+        # Write output to README with UTF-8 encoding
+        with open(os.path.join(output_dir, "README.md"), "w", encoding="utf-8") as f:
+            f.write("# Dataset Analysis\n\n")
+            f.write("## Analysis and Insights\n\n")
+            f.write(response)
+            f.write("\n\n## Visualizations\n")
+            for path in image_paths:
+                f.write(f"![Visualization]({os.path.basename(path)})\n")
+
+        print("README.md generated successfully with insights and visualizations.")
+
+    except Exception as e:
+        print(f"Error generating README: {e}")
+
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python autolysis.py <dataset.csv>")
+        print("Usage: uv run autolysis.py <dataset.csv>")
         sys.exit(1)
+
     file_path = sys.argv[1]
-    if not file_path.endswith(".csv"):
-        print("Error: File is not a CSV.")
-        sys.exit(1)
-    output_dir = os.path.splitext(file_path)[0]
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = os.path.splitext(os.path.basename(file_path))[0]
+
     data = load_data(file_path)
-    analysis = analyze_data(data)
-    visualize_data(data, output_dir)
-    narrative = generate_narrative(data, analysis, output_dir)
-    save_readme(narrative, output_dir)
+    data_summary = data.describe(include="all").to_dict()
+    insights = {"missing_values": data.isnull().sum().to_dict()}
+
+    image_paths = generate_visualizations(data, output_dir)
+    generate_readme(data_summary, insights, image_paths, output_dir)
     print(f"Analysis complete. Outputs saved in {output_dir}/")
 
 if __name__ == "__main__":
